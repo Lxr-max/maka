@@ -158,7 +158,6 @@ export class ModelAdapter {
   private readonly runtime: ResolvedModelRuntime;
   private readonly openAiChatReasoningTransportState: OpenAiChatReasoningTransportState;
   private readonly openAiResponsesTransportState: OpenAiResponsesTransportState;
-  private readonly pendingOpenResponsesExtensionReplay = new Map<string, ProviderOptions>();
 
   constructor(private readonly input: ModelAdapterInput) {
     this.runtime = input.resolvedRuntime ?? resolveModelRuntime(input.connection, input.modelId);
@@ -419,12 +418,16 @@ export class ModelAdapter {
   ): ModelStreamResult {
     const openAiResponsesTransportState = this.openAiResponsesTransportState;
     const resolvedRuntime = this.runtime;
+    // One map per physical request. AiSdkBackend can run concurrent send()
+    // calls through this adapter; a session-wide map would mix provider-owned
+    // item ids across streams and leak aborted carriers into later turns.
+    const pendingOpenResponsesExtensionReplay = new Map<string, ProviderOptions>();
     let settleOutcome!: (outcome: ModelStepOutcome) => void;
     const outcome = new Promise<ModelStepOutcome>((resolve) => {
       settleOutcome = resolve;
     });
     const translate = (chunk: AiSdkStreamChunk) =>
-      this.translateChunk(chunk, continuation.runtimeToolName);
+      this.translateChunk(chunk, continuation.runtimeToolName, pendingOpenResponsesExtensionReplay);
     const events: AsyncIterable<ModelStreamEvent> = {
       async *[Symbol.asyncIterator]() {
         let failure: ModelFailure | undefined;
@@ -466,6 +469,7 @@ export class ModelAdapter {
             yield { kind: 'error', failure };
           }
         } finally {
+          pendingOpenResponsesExtensionReplay.clear();
           if (continuation.abortSignal.aborted) {
             failure = normalizeProviderFailure(continuation.abortSignal.reason);
           }
@@ -574,17 +578,19 @@ export class ModelAdapter {
    * (`text-delta` / `reasoning-delta` / `finish-step` / `finish` / `error` / …);
    * the backend never sees them. Open Responses extension-replay carriers are
    * merged into the matching provider-executed tool-call so the opaque item
-   * survives RuntimeEvent persistence.
+   * survives RuntimeEvent persistence. The pending-carrier map is owned by one
+   * physical stream (`toModelStreamResult`); callers must not share it.
    */
   translateChunk(
     chunk: AiSdkStreamChunk,
     runtimeToolName?: (name: string) => string,
+    pendingOpenResponsesExtensionReplay: Map<string, ProviderOptions> = new Map(),
   ): ModelStreamEvent[] {
     if (isOpenResponsesExtensionReplayChunk(chunk)) {
       const providerOptions = providerOptionsFromSdkChunk(chunk);
       const item = openResponsesExtensionReplayItem(providerOptions);
       if (providerOptions && item && typeof item.id === 'string') {
-        this.pendingOpenResponsesExtensionReplay.set(item.id, providerOptions);
+        pendingOpenResponsesExtensionReplay.set(item.id, providerOptions);
       }
       return [];
     }
@@ -597,7 +603,7 @@ export class ModelAdapter {
         this.runtime,
         runtimeToolName,
       ),
-      this.pendingOpenResponsesExtensionReplay,
+      pendingOpenResponsesExtensionReplay,
     );
   }
 

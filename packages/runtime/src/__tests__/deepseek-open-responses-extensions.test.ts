@@ -468,6 +468,7 @@ describe('DeepSeek Open Responses extension codecs', () => {
 
   test('replays the hosted search item through the durable RuntimeEvent boundary', async () => {
     const adapter = deepSeekAdapter();
+    const pending = new Map();
     const item = {
       id: 'ws_durable',
       type: 'openai:web_search_call',
@@ -476,25 +477,33 @@ describe('DeepSeek Open Responses extension codecs', () => {
       action: { type: 'search', query: 'durable replay' },
     };
     assert.deepEqual(
-      adapter.translateChunk({
-        type: 'custom',
-        kind: OPEN_RESPONSES_EXTENSION_REPLAY_KIND,
-        providerMetadata: {
-          deepseek: { openResponsesExtension: { id: 'openai.web_search', item } },
+      adapter.translateChunk(
+        {
+          type: 'custom',
+          kind: OPEN_RESPONSES_EXTENSION_REPLAY_KIND,
+          providerMetadata: {
+            deepseek: { openResponsesExtension: { id: 'openai.web_search', item } },
+          },
         },
-      }),
+        undefined,
+        pending,
+      ),
       [],
     );
-    const translated = adapter.translateChunk({
-      type: 'tool-call',
-      toolCallId: 'ws_durable',
-      toolName: 'WebSearch',
-      input: JSON.stringify(item.action),
-      providerExecuted: true,
-      providerMetadata: {
-        deepseek: { openResponsesExtension: { id: 'openai.web_search', itemId: 'ws_durable' } },
+    const translated = adapter.translateChunk(
+      {
+        type: 'tool-call',
+        toolCallId: 'ws_durable',
+        toolName: 'WebSearch',
+        input: JSON.stringify(item.action),
+        providerExecuted: true,
+        providerMetadata: {
+          deepseek: { openResponsesExtension: { id: 'openai.web_search', itemId: 'ws_durable' } },
+        },
       },
-    });
+      undefined,
+      pending,
+    );
     const callEvent = translated[0];
     assert.equal(callEvent?.kind, 'tool-call');
     const persistedOptions =
