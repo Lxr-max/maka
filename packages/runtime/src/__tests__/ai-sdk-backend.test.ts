@@ -3343,18 +3343,40 @@ describe('AiSdkBackend model history', () => {
     );
   });
 
-  test('falls back to grounded text when Open Responses cannot replay a hosted tool pair', async () => {
-    const model = completionModel();
+  test('synthesizes a DeepSeek hosted tool call when replay metadata is missing', async () => {
+    let requestBody: Record<string, unknown> | undefined;
+    const fetch = (async (_url: string | URL | Request, init?: RequestInit) => {
+      requestBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      const events = [
+        { type: 'response.created', response: { id: 'response-current' } },
+        {
+          type: 'response.completed',
+          response: {
+            id: 'response-current',
+            object: 'response',
+            created_at: 8,
+            model: 'deepseek-v4-flash',
+            status: 'completed',
+            output: [],
+            usage: { input_tokens: 1, output_tokens: 1 },
+          },
+        },
+      ];
+      return new Response(
+        `${events.map((event) => `data: ${JSON.stringify(event)}`).join('\n\n')}\n\ndata: [DONE]\n\n`,
+        { status: 200, headers: { 'content-type': 'text/event-stream' } },
+      );
+    }) as unknown as typeof globalThis.fetch;
     const backend = createBackend({
       connection: {
-        slug: 'alibaba-token-plan-cn',
-        providerType: 'alibaba-token-plan-cn',
-        defaultModel: 'qwen3.8-max',
+        slug: 'deepseek',
+        providerType: 'deepseek',
+        defaultModel: 'deepseek-v4-flash',
       },
-      apiKey: 'alibaba-token',
-      modelId: 'qwen3.8-max',
-      modelFactory: () => model,
-      tools: [],
+      apiKey: 'deepseek-test-token',
+      modelId: 'deepseek-v4-flash',
+      modelFactory: (input) => getAIModel({ ...input, fetch }),
+      tools: [buildNativeWebSearchTool({ adapter: 'openai-responses' })],
     });
 
     await drain(
@@ -3416,10 +3438,17 @@ describe('AiSdkBackend model history', () => {
       }),
     );
 
-    const prompt = compactPrompt(model) as Array<{ role: string; content: unknown }>;
-    assert.match(JSON.stringify(prompt), /Maka shipped the feature/);
-    assert.equal(JSON.stringify(prompt).includes('tool-call'), false);
-    assert.equal(JSON.stringify(prompt).includes('tool-result'), false);
+    const input = requestBody?.input as Array<Record<string, unknown>> | undefined;
+    const searchCalls = input?.filter((item) => item.type === 'web_search_call');
+    assert.equal(searchCalls?.length, 1, JSON.stringify(input));
+    assert.deepEqual(searchCalls?.[0], {
+      id: 'search-1',
+      type: 'web_search_call',
+      status: 'completed',
+      action: { query: 'latest Maka' },
+    });
+    assert.match(JSON.stringify(input), /Maka shipped the feature/);
+    assert.equal(JSON.stringify(input).includes('web_search_result'), false);
   });
 
   test('keeps unrelated client tool history when degrading a hosted tool pair', async () => {
