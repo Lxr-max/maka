@@ -3344,6 +3344,8 @@ describe('AiSdkBackend model history', () => {
   });
 
   test('synthesizes a DeepSeek hosted tool call when replay metadata is missing', async () => {
+    // History without carrier `providerOptions` takes encodeInputItem's
+    // synthesis path: emit `web_search_call`, drop the tool-result, keep text.
     let requestBody: Record<string, unknown> | undefined;
     const fetch = (async (_url: string | URL | Request, init?: RequestInit) => {
       requestBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
@@ -3448,6 +3450,16 @@ describe('AiSdkBackend model history', () => {
       action: { query: 'latest Maka' },
     });
     assert.match(JSON.stringify(input), /Maka shipped the feature/);
+    assert.equal(
+      input?.some(
+        (item) =>
+          item.type === 'function_call_output' ||
+          item.type === 'web_search_result' ||
+          item.type === 'tool-result',
+      ),
+      false,
+      JSON.stringify(input),
+    );
     assert.equal(JSON.stringify(input).includes('web_search_result'), false);
   });
 

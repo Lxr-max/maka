@@ -182,6 +182,13 @@ describe('DeepSeek Open Responses extension codecs', () => {
       ).type,
       'openai:web_search',
     );
+    assert.equal(
+      rewriteDeepSeekOpenResponsesOutgoingBody({
+        tools: [{ type: 'function', name: 'Read' }],
+        input: [{ type: 'message', role: 'user', content: 'hi' }],
+      }),
+      undefined,
+    );
   });
 
   test('wrapFetch rewrites only allowlisted discriminators on the wire', async () => {
