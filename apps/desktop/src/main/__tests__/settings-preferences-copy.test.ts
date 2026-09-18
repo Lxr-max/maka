@@ -53,7 +53,7 @@ test('Traditional Chinese settings copy uses Taiwan terminology', () => {
   assert.equal(copy.about.clipboardUnavailable, '剪貼簿不可用或被系統拒絕。');
 });
 
-test('workHubHelp agrees that WorkHub is still unavailable', () => {
+test('workHubHelp says WorkHub is unavailable in every locale', () => {
   assert.equal(
     getSettingsPreferencesCopy('en').general.workHubHelp,
     'WorkHub is not available yet. This toggle is for development testing and does not enable a usable feature.',
