@@ -37,7 +37,10 @@ import { NATIVE_WEB_SEARCH_TOOL_NAME } from './native-web-search-tool.js';
  * namespaced `<implementor>:<type>` registrations, so a DeepSeek-only
  * allowlisted discriminator wrap maps those to DeepSeek's documented bare
  * `web_search` / `web_search_call` / `response.web_search_call.*` wire.
- * When vercel/ai#19939 (`allowBareTypes`) ships, the wrap becomes a no-op.
+ * When vercel/ai#19939 (`allowBareTypes`) ships, the wrap becomes a no-op
+ * only if the SDK also relaxes its item/event parsers: today those still
+ * require a `:` in the type, so a flag-only upstream would register the
+ * bare branch and then silently stop decoding.
  */
 
 /**
@@ -75,12 +78,6 @@ const INCOMING_TOOL_TYPES = new Map<string, string>([
   [WEB_SEARCH_TOOL, NAMESPACED_WEB_SEARCH_TOOL],
   ['web_search_2025_08_26', NAMESPACED_WEB_SEARCH_TOOL],
   [WEB_SEARCH_ITEM, NAMESPACED_WEB_SEARCH_ITEM],
-]);
-
-const OUTGOING_EVENT_TYPES = new Map<string, string>([
-  [NAMESPACED_WEB_SEARCH_EVENTS.inProgress, WEB_SEARCH_EVENTS.inProgress],
-  [NAMESPACED_WEB_SEARCH_EVENTS.searching, WEB_SEARCH_EVENTS.searching],
-  [NAMESPACED_WEB_SEARCH_EVENTS.completed, WEB_SEARCH_EVENTS.completed],
 ]);
 
 const INCOMING_EVENT_TYPES = new Map<string, string>([
@@ -218,6 +215,9 @@ export function openResponsesExtensionReplayReferenceOptions(
 }
 
 export function createDeepSeekOpenResponsesExtensions(): readonly Experimental_OpenResponsesExtension[] {
+  // Probe the constructor, not just the type. @ai-sdk/open-responses@2.0.44
+  // still asserts namespaced item/event types even if `allowBareTypes` is set,
+  // so this branch is only safe once both the registry and the parsers agree.
   const registeredItemType = openResponsesSupportsBareExtensionTypes()
     ? WEB_SEARCH_ITEM
     : NAMESPACED_WEB_SEARCH_ITEM;
@@ -283,16 +283,25 @@ export function wrapFetchForDeepSeekOpenResponsesExtensions(
 
 export function rewriteDeepSeekOpenResponsesOutgoingBody(
   body: Record<string, unknown>,
-): Record<string, unknown> {
-  const next = { ...body };
-  if (Array.isArray(next.tools)) {
-    next.tools = next.tools.map((tool) => rewriteMappedType(tool, OUTGOING_TOOL_TYPES));
+): Record<string, unknown> | undefined {
+  let next: Record<string, unknown> | undefined;
+  const assign = (key: string, value: unknown) => {
+    next ??= { ...body };
+    next[key] = value;
+  };
+  if (Array.isArray(body.tools)) {
+    const original = body.tools;
+    const tools = original.map((tool) => rewriteMappedType(tool, OUTGOING_TOOL_TYPES));
+    if (tools.some((tool, index) => tool !== original[index])) assign('tools', tools);
   }
-  if (isRecord(next.tool_choice)) {
-    next.tool_choice = rewriteMappedType(next.tool_choice, OUTGOING_TOOL_TYPES);
+  if (isRecord(body.tool_choice)) {
+    const toolChoice = rewriteMappedType(body.tool_choice, OUTGOING_TOOL_TYPES);
+    if (toolChoice !== body.tool_choice) assign('tool_choice', toolChoice);
   }
-  if (Array.isArray(next.input)) {
-    next.input = next.input.map((item) => rewriteMappedType(item, OUTGOING_TOOL_TYPES));
+  if (Array.isArray(body.input)) {
+    const original = body.input;
+    const input = original.map((item) => rewriteMappedType(item, OUTGOING_TOOL_TYPES));
+    if (input.some((item, index) => item !== original[index])) assign('input', input);
   }
   return next;
 }
@@ -358,6 +367,10 @@ function decodeDeepSeekWebSearchItem(options: {
       providerExecuted: true,
     },
   ];
+  // Streaming materializes the call/result from `output_item.done`, so
+  // non-terminal statuses stay as tool-input-start only. generate() has no
+  // later item, so emit the result even for `in_progress` to keep doGenerate
+  // callers on a complete provider-executed pair.
   if (item.status === 'completed' || item.status === 'failed' || options.mode === 'generate') {
     parts.push({
       type: 'tool-result',
@@ -498,7 +511,8 @@ async function rewriteOutgoingRequestBody(request: Request): Promise<string | un
     return undefined;
   }
   if (!isRecord(parsed)) return undefined;
-  return JSON.stringify(rewriteDeepSeekOpenResponsesOutgoingBody(parsed));
+  const rewritten = rewriteDeepSeekOpenResponsesOutgoingBody(parsed);
+  return rewritten === undefined ? undefined : JSON.stringify(rewritten);
 }
 
 async function cloneRequestBody(request: Request): Promise<ArrayBuffer | null> {
