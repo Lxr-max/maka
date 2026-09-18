@@ -226,6 +226,28 @@ describe('DeepSeek Open Responses extension codecs', () => {
     );
   });
 
+  test('wrapFetch keeps JSON request bodies as text when nothing maps', async () => {
+    if (openResponsesSupportsBareExtensionTypes()) return;
+    let sent: unknown;
+    const fetch = wrapFetchForDeepSeekOpenResponsesExtensions(async (_url, init) => {
+      sent = init?.body;
+      return Response.json({ output: [] });
+    });
+    await fetch('https://example.test/v1/responses', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        tools: [{ type: 'function', name: 'Read' }],
+        input: [{ type: 'message', role: 'user', content: 'hi' }],
+      }),
+    });
+    assert.equal(typeof sent, 'string');
+    assert.deepEqual(JSON.parse(String(sent)), {
+      tools: [{ type: 'function', name: 'Read' }],
+      input: [{ type: 'message', role: 'user', content: 'hi' }],
+    });
+  });
+
   test('encodes DeepSeek hosted search as a bare web_search tool', async () => {
     const bodies: Record<string, unknown>[] = [];
     const fetch = (async (_url: string | URL | Request, init?: RequestInit) => {
