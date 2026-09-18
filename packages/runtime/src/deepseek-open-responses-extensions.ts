@@ -275,7 +275,7 @@ export function wrapFetchForDeepSeekOpenResponsesExtensions(
     if (rewrittenBody !== undefined) headers.delete('content-length');
     const response = await upstream(
       request.url,
-      requestInit(request, headers, rewrittenBody ?? (await cloneRequestBody(request)), signal),
+      requestInit(request, headers, rewrittenBody ?? (await cloneOutgoingBody(request)), signal),
     );
     return rewriteIncomingResponse(response);
   };
@@ -515,9 +515,12 @@ async function rewriteOutgoingRequestBody(request: Request): Promise<string | un
   return rewritten === undefined ? undefined : JSON.stringify(rewritten);
 }
 
-async function cloneRequestBody(request: Request): Promise<ArrayBuffer | null> {
+async function cloneOutgoingBody(request: Request): Promise<BodyInit | null> {
   if (request.body === null) return null;
-  return request.clone().arrayBuffer();
+  const raw = await request.clone().arrayBuffer();
+  // Keep JSON as text so callers that `JSON.parse(String(init.body))` still
+  // work, and so a no-op wrap does not re-serialize the original payload.
+  return requestHasJsonBody(request) ? new TextDecoder().decode(raw) : raw;
 }
 
 async function rewriteIncomingResponse(response: Response): Promise<Response> {
