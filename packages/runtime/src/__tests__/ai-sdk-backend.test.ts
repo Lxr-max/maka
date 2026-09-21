@@ -3000,8 +3000,15 @@ describe('AiSdkBackend model history', () => {
               kind: 'function_response',
               id: 'search-1',
               name: 'WebSearch',
-              result: { type: 'web_search_result', query: 'latest Maka' },
-              providerOutput: { type: 'web_search_result', id: 'ws_123' },
+              result: [
+                {
+                  type: 'web_search_result',
+                  url: 'https://maka.example/',
+                  title: 'Maka',
+                  pageAge: '2026-08-04',
+                  encryptedContent: 'encrypted-result-ws_123',
+                },
+              ],
               providerExecuted: true,
               isError: false,
             },
@@ -3276,6 +3283,149 @@ describe('AiSdkBackend model history', () => {
       JSON.stringify(input),
     );
     assert.equal(JSON.stringify(input).includes('web_search_result'), false);
+  });
+
+  test('drops DeepSeek hosted search when replaying onto deepseek-chat', async () => {
+    let requestBody: Record<string, unknown> | undefined;
+    const fetch = (async (_url: string | URL | Request, init?: RequestInit) => {
+      requestBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      const chunk = (delta: unknown, finish_reason: string | null = null) => ({
+        id: 'chat-switch',
+        object: 'chat.completion.chunk',
+        created: 1,
+        model: 'deepseek-chat',
+        choices: [{ index: 0, delta, finish_reason }],
+      });
+      const events = [
+        chunk({ role: 'assistant', content: '' }),
+        chunk({ content: 'ok' }),
+        chunk({}, 'stop'),
+      ];
+      return new Response(
+        `${events.map((event) => `data: ${JSON.stringify(event)}`).join('\n\n')}\n\ndata: [DONE]\n\n`,
+        { status: 200, headers: { 'content-type': 'text/event-stream' } },
+      );
+    }) as unknown as typeof globalThis.fetch;
+    const backend = createBackend({
+      connection: {
+        slug: 'deepseek',
+        providerType: 'deepseek',
+        defaultModel: 'deepseek-chat',
+      },
+      apiKey: 'deepseek-test-token',
+      modelId: 'deepseek-chat',
+      modelFactory: (input) => getAIModel({ ...input, fetch }),
+      tools: [],
+    });
+
+    const events: SessionEvent[] = [];
+    await collectEvents(
+      backend.send({
+        turnId: 'turn-current',
+        text: '',
+        context: [],
+        runtimeContext: deepSeekHostedSearchHistory(),
+        continuation: {
+          sourceInvocationId: 'invocation-source',
+          sourceRunId: 'run-source',
+          sourceTurnId: 'turn-prev',
+          sourceRuntimeEventHighWater: 4,
+        },
+      }),
+      events,
+    );
+
+    assert.equal(
+      events.find((event) => event.type === 'error'),
+      undefined,
+      JSON.stringify(events.find((event) => event.type === 'error')),
+    );
+    const messages = requestBody?.messages as Array<Record<string, unknown>> | undefined;
+    assert.match(JSON.stringify(messages), /Maka shipped the feature/);
+    assert.equal(
+      messages?.some((message) => {
+        const toolCalls = message.tool_calls;
+        return (
+          Array.isArray(toolCalls) &&
+          toolCalls.some((call) => {
+            if (!call || typeof call !== 'object') return false;
+            const fn = (call as { function?: { name?: string } }).function;
+            return fn?.name === 'WebSearch';
+          })
+        );
+      }),
+      false,
+      JSON.stringify(messages),
+    );
+    assert.equal(
+      messages?.some((message) => message.role === 'tool'),
+      false,
+      JSON.stringify(messages),
+    );
+  });
+
+  test('drops DeepSeek hosted search when replaying onto Anthropic web_search', async () => {
+    let requestBody: Record<string, unknown> | undefined;
+    const fetch = (async (_url: string | URL | Request, init?: RequestInit) => {
+      requestBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      return new Response(anthropicCompletedSse('ok'), {
+        status: 200,
+        headers: { 'content-type': 'text/event-stream' },
+      });
+    }) as unknown as typeof globalThis.fetch;
+    const backend = createBackend({
+      connection: connection(),
+      apiKey: 'anthropic-test-token',
+      modelId: 'claude-sonnet-4-5-20250929',
+      modelFactory: (input) => getAIModel({ ...input, fetch }),
+      tools: [buildNativeWebSearchTool({ adapter: 'anthropic-messages' })],
+    });
+
+    const events: SessionEvent[] = [];
+    await collectEvents(
+      backend.send({
+        turnId: 'turn-current',
+        text: '',
+        context: [],
+        runtimeContext: deepSeekHostedSearchHistory({
+          providerOptions: {
+            deepseek: {
+              openResponsesExtension: {
+                id: 'openai.web_search',
+                item: {
+                  id: 'search-1',
+                  type: 'web_search_call',
+                  status: 'completed',
+                  action: { type: 'search', query: 'latest Maka' },
+                },
+              },
+            },
+          },
+          result: {
+            type: 'web_search_call',
+            status: 'completed',
+            action: { query: 'latest Maka' },
+          },
+        }),
+        continuation: {
+          sourceInvocationId: 'invocation-source',
+          sourceRunId: 'run-source',
+          sourceTurnId: 'turn-prev',
+          sourceRuntimeEventHighWater: 4,
+        },
+      }),
+      events,
+    );
+
+    assert.equal(
+      events.find((event) => event.type === 'error'),
+      undefined,
+      JSON.stringify(events.find((event) => event.type === 'error')),
+    );
+    const wire = JSON.stringify(requestBody);
+    assert.match(wire, /Maka shipped the feature/);
+    assert.equal(wire.includes('server_tool_use'), false, wire);
+    assert.equal(wire.includes('web_search_tool_result'), false, wire);
   });
 
   test('keeps unrelated client tool history when degrading a hosted tool pair', async () => {
@@ -16733,6 +16883,95 @@ function countingToolLoopModel(toolCallsBeforeStop?: number): {
     },
   });
   return { model, callCount: () => calls };
+}
+
+function deepSeekHostedSearchHistory(input?: {
+  providerOptions?: Record<string, unknown>;
+  result?: unknown;
+}): RuntimeEvent[] {
+  return [
+    runtimeTextEvent({
+      id: 'rt-u-search',
+      turnId: 'turn-prev',
+      role: 'user',
+      author: 'user',
+      text: 'search',
+    }),
+    runtimeEvent({
+      id: 'rt-search-call',
+      turnId: 'turn-prev',
+      role: 'model',
+      author: 'agent',
+      refs: { stepId: 'provider-step' },
+      content: {
+        kind: 'function_call',
+        id: 'search-1',
+        name: 'WebSearch',
+        args: { query: 'latest Maka' },
+        providerExecuted: true,
+        ...(input?.providerOptions !== undefined ? { providerOptions: input.providerOptions } : {}),
+      },
+    }),
+    runtimeEvent({
+      id: 'rt-search-result',
+      turnId: 'turn-prev',
+      role: 'tool',
+      author: 'tool',
+      content: {
+        kind: 'function_response',
+        id: 'search-1',
+        name: 'WebSearch',
+        result: input?.result ?? { type: 'web_search_result', query: 'latest Maka' },
+        providerExecuted: true,
+        isError: false,
+      },
+    }),
+    runtimeEvent({
+      id: 'rt-search-text',
+      turnId: 'turn-prev',
+      role: 'model',
+      author: 'agent',
+      refs: { providerEventId: 'provider-step' },
+      content: { kind: 'text', text: 'Maka shipped the feature.' },
+    }),
+  ];
+}
+
+function anthropicCompletedSse(text: string): string {
+  const send = (event: string, data: unknown) =>
+    `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
+  return [
+    send('message_start', {
+      type: 'message_start',
+      message: {
+        id: 'msg-switch',
+        type: 'message',
+        role: 'assistant',
+        model: 'claude-sonnet-4-5-20250929',
+        content: [],
+        stop_reason: null,
+        stop_sequence: null,
+        usage: { input_tokens: 8, output_tokens: 0 },
+      },
+    }),
+    send('content_block_start', {
+      type: 'content_block_start',
+      index: 0,
+      content_block: { type: 'text', text: '' },
+    }),
+    send('content_block_delta', {
+      type: 'content_block_delta',
+      index: 0,
+      delta: { type: 'text_delta', text },
+    }),
+    send('content_block_stop', { type: 'content_block_stop', index: 0 }),
+    send('message_delta', {
+      type: 'message_delta',
+      delta: { stop_reason: 'end_turn' },
+      usage: { output_tokens: 1 },
+    }),
+    send('message_stop', { type: 'message_stop' }),
+  ].join('');
 }
 
 function runtimeTextEvent(input: {

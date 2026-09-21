@@ -286,6 +286,78 @@ describe('ModelAdapter stream and error normalization', () => {
       unsignedThinking: false,
       responsesReasoning: 'plaintext-content',
     });
+    assert.equal(
+      adapter.canReplayProviderExecutedExchange({
+        providerExecuted: true,
+        toolName: 'WebSearch',
+        providerOptions: {
+          deepseek: {
+            openResponsesExtension: {
+              id: 'openai.web_search',
+              item: { id: 'ws_1', type: 'web_search_call' },
+            },
+          },
+        },
+      }),
+      true,
+    );
+  });
+
+  test('drops provider-executed hosted search on DeepSeek chat and foreign Anthropic wires', () => {
+    const chat = new ModelAdapter({
+      connection: {
+        slug: 'deepseek',
+        providerType: 'deepseek',
+        defaultModel: 'deepseek-chat',
+      },
+      apiKey: 'deepseek-token',
+      modelId: 'deepseek-chat',
+      modelFactory: () => ({}),
+      newId: idGenerator(),
+      now: monotonicClock(),
+    });
+    const anthropic = new ModelAdapter({
+      connection: {
+        slug: 'anthropic-main',
+        providerType: 'anthropic',
+        defaultModel: 'claude-sonnet-4-5-20250929',
+      },
+      apiKey: 'anthropic-token',
+      modelId: 'claude-sonnet-4-5-20250929',
+      modelFactory: () => ({}),
+      newId: idGenerator(),
+      now: monotonicClock(),
+    });
+    const deepSeekPair = {
+      providerExecuted: true as const,
+      toolName: 'WebSearch',
+      providerOptions: {
+        deepseek: {
+          openResponsesExtension: {
+            id: 'openai.web_search',
+            item: { id: 'ws_1', type: 'web_search_call', status: 'completed' },
+          },
+        },
+      },
+      output: { type: 'web_search_call', status: 'completed' },
+    };
+    assert.equal(chat.canReplayProviderExecutedExchange(deepSeekPair), false);
+    assert.equal(anthropic.canReplayProviderExecutedExchange(deepSeekPair), false);
+    assert.equal(
+      anthropic.canReplayProviderExecutedExchange({
+        providerExecuted: true,
+        toolName: 'WebSearch',
+        providerOptions: { anthropic: { type: 'server_tool_use' } },
+        output: [
+          {
+            type: 'web_search_result',
+            url: 'https://maka.example/',
+            encryptedContent: 'encrypted-result',
+          },
+        ],
+      }),
+      true,
+    );
   });
 
   test('supports summary-item Responses reasoning replay for Alibaba Token Plan', () => {

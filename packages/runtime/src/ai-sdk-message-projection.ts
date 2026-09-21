@@ -194,8 +194,7 @@ export class AiSdkMessageProjection {
       if (item.kind === 'tool_result' && !support.toolResults) return false;
       if (
         (item.kind === 'tool_call' || item.kind === 'tool_result') &&
-        item.providerExecuted === true &&
-        !support.providerExecutedTools
+        !this.canReplayProviderExecutedItem(item)
       ) {
         return false;
       }
@@ -218,11 +217,22 @@ export class AiSdkMessageProjection {
       items: plan.items.filter((item) => {
         if (item.kind === 'tool_call' || item.kind === 'tool_result') {
           if (!support.toolCalls || !support.toolResults) return false;
-          if (item.providerExecuted === true && !support.providerExecutedTools) return false;
+          if (!this.canReplayProviderExecutedItem(item)) return false;
         }
         return true;
       }),
     };
+  }
+
+  private canReplayProviderExecutedItem(item: RuntimeEventModelReplayItem): boolean {
+    if (item.kind !== 'tool_call' && item.kind !== 'tool_result') return true;
+    if (item.providerExecuted !== true) return true;
+    return this.input.modelAdapter.canReplayProviderExecutedExchange({
+      providerExecuted: true,
+      ...(item.kind === 'tool_call' ? { providerOptions: item.providerOptions } : {}),
+      toolName: item.toolName,
+      ...(item.kind === 'tool_result' ? { output: item.output } : {}),
+    });
   }
 
   /**
@@ -407,6 +417,16 @@ export class AiSdkMessageProjection {
       // stay after text because their execution begins only after this step.
       for (const { call, result } of exchanges) {
         if (call.providerExecuted !== true) continue;
+        if (
+          !this.input.modelAdapter.canReplayProviderExecutedExchange({
+            providerExecuted: true,
+            providerOptions: call.providerOptions,
+            toolName: call.toolName,
+            output: result?.output,
+          })
+        ) {
+          continue;
+        }
         const replayCarrier = openResponsesExtensionReplayCarrierPart(call.providerOptions);
         if (replayCarrier) content.push(replayCarrier);
         const replayReference = openResponsesExtensionReplayReferenceOptions(call.providerOptions);

@@ -117,7 +117,8 @@ export function getAIModel(input: ModelFactoryInput): LanguageModelV4 {
     // Discriminator rewrite sits closest to the network so overlays still
     // see SDK namespaced types. @ai-sdk/open-responses@2.0.44 only accepts
     // `<namespace>:<type>`; DeepSeek documents bare `web_search` /
-    // `web_search_call`. Drop the wrap when vercel/ai#19939 ships.
+    // `web_search_call`. Keep the wrap even if vercel/ai#19939 ships a
+    // flag-only `allowBareTypes` — the parsers still require a `:`.
     const transportFetch = deepSeekExtensions
       ? wrapFetchForDeepSeekOpenResponsesExtensions(baseFetch)
       : baseFetch;

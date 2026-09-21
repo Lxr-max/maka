@@ -17,13 +17,12 @@
  * under the License.
  */
 
-import {
-  createOpenResponses,
-  type Experimental_OpenResponsesExtension,
-  type Experimental_OpenResponsesExtensionContentPart,
-  type Experimental_OpenResponsesExtensionInputPart,
-  type Experimental_OpenResponsesExtensionItem,
-  type Experimental_OpenResponsesExtensionStreamPart,
+import type {
+  Experimental_OpenResponsesExtension,
+  Experimental_OpenResponsesExtensionContentPart,
+  Experimental_OpenResponsesExtensionInputPart,
+  Experimental_OpenResponsesExtensionItem,
+  Experimental_OpenResponsesExtensionStreamPart,
 } from '@ai-sdk/open-responses';
 import type { JSONObject, JSONValue, LanguageModelV4ProviderTool } from '@ai-sdk/provider';
 import type { CustomPart, ProviderOptions } from './model-protocol.js';
@@ -37,10 +36,10 @@ import { NATIVE_WEB_SEARCH_TOOL_NAME } from './native-web-search-tool.js';
  * namespaced `<implementor>:<type>` registrations, so a DeepSeek-only
  * allowlisted discriminator wrap maps those to DeepSeek's documented bare
  * `web_search` / `web_search_call` / `response.web_search_call.*` wire.
- * When vercel/ai#19939 (`allowBareTypes`) ships, the wrap becomes a no-op
- * only if the SDK also relaxes its item/event parsers: today those still
- * require a `:` in the type, so a flag-only upstream would register the
- * bare branch and then silently stop decoding.
+ * Namespaced registration plus the discriminator wrap already emit DeepSeek's
+ * bare wire. Do not register a bare `allowBareTypes` variant: a flag-only
+ * upstream (vercel/ai#19939) would accept the probe and then silently stop
+ * decoding because the SDK parsers still require a `:`.
  */
 
 /**
@@ -85,38 +84,6 @@ const INCOMING_EVENT_TYPES = new Map<string, string>([
   [WEB_SEARCH_EVENTS.searching, NAMESPACED_WEB_SEARCH_EVENTS.searching],
   [WEB_SEARCH_EVENTS.completed, NAMESPACED_WEB_SEARCH_EVENTS.completed],
 ]);
-
-type BareOpenResponsesExtension = Experimental_OpenResponsesExtension & {
-  allowBareTypes?: true;
-  bareToolType?: string;
-  bareItemTypes?: readonly string[];
-  bareEventTypes?: readonly string[];
-};
-
-let cachedBareTypeSupport: boolean | undefined;
-
-/** True when this `@ai-sdk/open-responses` build accepts allowlisted bare discriminators. */
-export function openResponsesSupportsBareExtensionTypes(): boolean {
-  if (cachedBareTypeSupport !== undefined) return cachedBareTypeSupport;
-  try {
-    createOpenResponses({
-      name: 'maka-open-responses-bare-probe',
-      url: 'http://127.0.0.1/maka-open-responses-bare-probe',
-      experimental_extensions: [
-        {
-          id: 'maka.web_search',
-          allowBareTypes: true,
-          bareToolType: WEB_SEARCH_TOOL,
-          encodeTool: () => ({}),
-        } as Experimental_OpenResponsesExtension,
-      ],
-    });
-    cachedBareTypeSupport = true;
-  } catch {
-    cachedBareTypeSupport = false;
-  }
-  return cachedBareTypeSupport;
-}
 
 export function usesDeepSeekOpenResponsesExtensions(providerType: string): boolean {
   return providerType === 'deepseek';
@@ -211,57 +178,37 @@ export function openResponsesExtensionReplayReferenceOptions(
     next[key] = { ...value, openResponsesExtension: { id, itemId } };
     rewritten = true;
   }
-  return rewritten ? (next as ProviderOptions) : (providerOptions as ProviderOptions);
+  return rewritten ? (next as ProviderOptions) : undefined;
 }
 
 export function createDeepSeekOpenResponsesExtensions(): readonly Experimental_OpenResponsesExtension[] {
-  // Probe the constructor, not just the type. @ai-sdk/open-responses@2.0.44
-  // still asserts namespaced item/event types even if `allowBareTypes` is set,
-  // so this branch is only safe once both the registry and the parsers agree.
-  const registeredItemType = openResponsesSupportsBareExtensionTypes()
-    ? WEB_SEARCH_ITEM
-    : NAMESPACED_WEB_SEARCH_ITEM;
-  const extension: BareOpenResponsesExtension = openResponsesSupportsBareExtensionTypes()
-    ? {
-        id: DEEPSEEK_OPEN_RESPONSES_WEB_SEARCH_EXTENSION_ID,
-        allowBareTypes: true,
-        bareToolType: WEB_SEARCH_TOOL,
-        bareItemTypes: [WEB_SEARCH_ITEM],
-        bareEventTypes: [
-          WEB_SEARCH_EVENTS.inProgress,
-          WEB_SEARCH_EVENTS.searching,
-          WEB_SEARCH_EVENTS.completed,
-        ],
-        encodeTool: encodeDeepSeekWebSearchTool,
-        decodeItem: decodeDeepSeekWebSearchItem,
-        encodeInputItem: (options) => encodeDeepSeekWebSearchInputItem(options, registeredItemType),
-        decodeEvent: decodeDeepSeekWebSearchEvent,
-      }
-    : {
-        id: DEEPSEEK_OPEN_RESPONSES_WEB_SEARCH_EXTENSION_ID,
-        toolType: NAMESPACED_WEB_SEARCH_TOOL,
-        itemTypes: [NAMESPACED_WEB_SEARCH_ITEM],
-        eventTypes: [
-          NAMESPACED_WEB_SEARCH_EVENTS.inProgress,
-          NAMESPACED_WEB_SEARCH_EVENTS.searching,
-          NAMESPACED_WEB_SEARCH_EVENTS.completed,
-        ],
-        encodeTool: encodeDeepSeekWebSearchTool,
-        decodeItem: decodeDeepSeekWebSearchItem,
-        encodeInputItem: (options) => encodeDeepSeekWebSearchInputItem(options, registeredItemType),
-        decodeEvent: decodeDeepSeekWebSearchEvent,
-      };
-  return [extension as Experimental_OpenResponsesExtension];
+  return [
+    {
+      id: DEEPSEEK_OPEN_RESPONSES_WEB_SEARCH_EXTENSION_ID,
+      toolType: NAMESPACED_WEB_SEARCH_TOOL,
+      itemTypes: [NAMESPACED_WEB_SEARCH_ITEM],
+      eventTypes: [
+        NAMESPACED_WEB_SEARCH_EVENTS.inProgress,
+        NAMESPACED_WEB_SEARCH_EVENTS.searching,
+        NAMESPACED_WEB_SEARCH_EVENTS.completed,
+      ],
+      encodeTool: encodeDeepSeekWebSearchTool,
+      decodeItem: decodeDeepSeekWebSearchItem,
+      encodeInputItem: (options) =>
+        encodeDeepSeekWebSearchInputItem(options, NAMESPACED_WEB_SEARCH_ITEM),
+      decodeEvent: decodeDeepSeekWebSearchEvent,
+    },
+  ];
 }
 
 /**
- * Allowlisted discriminator adapter until `@ai-sdk/open-responses` accepts
- * `allowBareTypes` (vercel/ai#19939). Unknown types are left untouched.
+ * Allowlisted discriminator adapter. Namespaced registration stays in place
+ * even if vercel/ai#19939 ships a flag-only `allowBareTypes`. Unknown types
+ * are left untouched.
  */
 export function wrapFetchForDeepSeekOpenResponsesExtensions(
   upstream: typeof globalThis.fetch,
 ): typeof globalThis.fetch {
-  if (openResponsesSupportsBareExtensionTypes()) return upstream;
   return async (input, init) => {
     const request = new Request(input, init);
     const signal =
@@ -402,6 +349,10 @@ function encodeDeepSeekWebSearchInputItem(
       type: registeredItemType,
     } as Experimental_OpenResponsesExtensionItem;
   }
+  // The SDK dedups extension input items on `${type}:${id}`. Distinct searches
+  // must keep distinct item ids. Whether DeepSeek reuses `web_search_call` ids
+  // across responses is unverified, so replay treats id uniqueness as a
+  // request-history invariant.
   if (part.toolCallId.length === 0) return undefined;
   const action = actionFromToolInput(part.input);
   return {

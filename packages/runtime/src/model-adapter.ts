@@ -90,6 +90,7 @@ import {
   openResponsesExtensionReplayItem,
   usesDeepSeekOpenResponsesExtensions,
 } from './deepseek-open-responses-extensions.js';
+import { NATIVE_WEB_SEARCH_TOOL_NAME } from './native-web-search-tool.js';
 import type { ProviderOptions } from './model-protocol.js';
 
 /**
@@ -203,6 +204,35 @@ export class ModelAdapter {
                   }
                 : 'none',
     };
+  }
+
+  /**
+   * Whether this target adapter can consume a persisted provider-executed
+   * exchange. `providerExecutedTools` admits DeepSeek hosted pairs on every
+   * DeepSeek wire; chat converters still emit those calls as client
+   * `tool_calls` with no matching `tool` message, and Anthropic coerces an
+   * unrecognized `WebSearch` pair into `server_tool_use` that fails its
+   * output schema. Gate emission on the target recognizing the replay state.
+   */
+  canReplayProviderExecutedExchange(item: ProviderExecutedReplayProbe): boolean {
+    if (item.providerExecuted !== true) return true;
+    if (!this.runtimeEventReplaySupport().providerExecutedTools) return false;
+    const { wire, reasoningReplay } = this.runtime;
+    if (wire === 'openai-chat' || reasoningReplay.kind === 'openai-chat-plaintext') {
+      return false;
+    }
+    if (isOpenResponsesHostedSearchReplay(item)) {
+      return (
+        usesDeepSeekOpenResponsesExtensions(this.input.connection.providerType) &&
+        wire === 'openai-responses' &&
+        reasoningReplay.kind === 'responses' &&
+        reasoningReplay.contract.adapter === 'open-responses'
+      );
+    }
+    if (item.toolName === NATIVE_WEB_SEARCH_TOOL_NAME && wire === 'anthropic-messages') {
+      return isAnthropicHostedSearchReplay(item);
+    }
+    return true;
   }
 
   resolveModel(): unknown {
@@ -791,6 +821,13 @@ function fixedAnthropicThinkingBudget(
   if (!thinking || typeof thinking !== 'object' || Array.isArray(thinking)) return 0;
   const { type, budgetTokens } = thinking as { type?: unknown; budgetTokens?: unknown };
   return type === 'enabled' && typeof budgetTokens === 'number' ? budgetTokens : 0;
+}
+
+export interface ProviderExecutedReplayProbe {
+  providerExecuted?: boolean;
+  providerOptions?: unknown;
+  toolName?: string;
+  output?: unknown;
 }
 
 export interface ModelAdapterRuntimeEventReplaySupport {
@@ -1383,6 +1420,28 @@ function providerOptionsFromSdkChunk(chunk: AiSdkStreamChunk): ProviderOptions |
   const raw = chunk.providerMetadata ?? chunk.providerOptions;
   if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) return undefined;
   return raw as ProviderOptions;
+}
+
+function isReplayRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function isOpenResponsesHostedSearchReplay(item: ProviderExecutedReplayProbe): boolean {
+  if (openResponsesExtensionReplayItem(item.providerOptions)) return true;
+  if (!isReplayRecord(item.output)) return false;
+  return item.output.type === 'web_search_call' || item.output.type === 'openai:web_search_call';
+}
+
+function isAnthropicHostedSearchReplay(item: ProviderExecutedReplayProbe): boolean {
+  if (isReplayRecord(item.providerOptions)) {
+    const anthropic = item.providerOptions.anthropic;
+    if (isReplayRecord(anthropic) && anthropic.type === 'server_tool_use') return true;
+  }
+  if (!Array.isArray(item.output)) return false;
+  return item.output.some((entry) => {
+    if (!isReplayRecord(entry) || entry.type !== 'web_search_result') return false;
+    return typeof entry.url === 'string' || typeof entry.encryptedContent === 'string';
+  });
 }
 
 function parseProviderExecutedToolInput(input: unknown): unknown {

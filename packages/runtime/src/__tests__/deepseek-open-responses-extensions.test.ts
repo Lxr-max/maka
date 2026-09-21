@@ -35,7 +35,6 @@ import {
   openResponsesExtensionReplayCarrierPart,
   openResponsesExtensionReplayItem,
   openResponsesExtensionReplayReferenceOptions,
-  openResponsesSupportsBareExtensionTypes,
   rewriteDeepSeekOpenResponsesIncomingValue,
   rewriteDeepSeekOpenResponsesOutgoingBody,
   usesDeepSeekOpenResponsesExtensions,
@@ -133,7 +132,6 @@ describe('DeepSeek Open Responses extension codecs', () => {
   });
 
   test('rewrites only allowlisted DeepSeek discriminators', () => {
-    if (openResponsesSupportsBareExtensionTypes()) return;
     assert.deepEqual(
       rewriteDeepSeekOpenResponsesOutgoingBody({
         tools: [
@@ -192,7 +190,6 @@ describe('DeepSeek Open Responses extension codecs', () => {
   });
 
   test('wrapFetch rewrites only allowlisted discriminators on the wire', async () => {
-    if (openResponsesSupportsBareExtensionTypes()) return;
     let sent: Record<string, unknown> | undefined;
     const fetch = wrapFetchForDeepSeekOpenResponsesExtensions(async (_url, init) => {
       sent = JSON.parse(String(init?.body)) as Record<string, unknown>;
@@ -227,7 +224,6 @@ describe('DeepSeek Open Responses extension codecs', () => {
   });
 
   test('wrapFetch keeps JSON request bodies as text when nothing maps', async () => {
-    if (openResponsesSupportsBareExtensionTypes()) return;
     let sent: unknown;
     const fetch = wrapFetchForDeepSeekOpenResponsesExtensions(async (_url, init) => {
       sent = init?.body;
@@ -474,6 +470,78 @@ describe('DeepSeek Open Responses extension codecs', () => {
     assert.deepEqual(replayed?.[0]?.action, { type: 'open_page', url: 'https://maka.example/' });
   });
 
+  test('replays distinct hosted search items when ids differ', async () => {
+    // SDK encode dedups on `${type}:${id}`. Distinct ids must both reach the
+    // wire; same-id reuse across DeepSeek responses is unverified.
+    const bodies: Record<string, unknown>[] = [];
+    const fetch = (async (_url: string | URL | Request, init?: RequestInit) => {
+      bodies.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
+      return Response.json(completedResponse([]));
+    }) as unknown as typeof globalThis.fetch;
+    const model = getAIModel({
+      connection: conn('deepseek'),
+      apiKey: 'test-key',
+      modelId: 'deepseek-v4-flash',
+      fetch,
+    });
+    const first = {
+      type: 'tool-call' as const,
+      toolCallId: 'ws_a',
+      toolName: 'WebSearch',
+      input: JSON.stringify({ type: 'search', query: 'first' }),
+      providerExecuted: true,
+      providerOptions: {
+        deepseek: {
+          openResponsesExtension: {
+            id: 'openai.web_search',
+            item: {
+              id: 'ws_a',
+              type: 'openai:web_search_call',
+              status: 'completed',
+              action: { type: 'search', query: 'first' },
+            },
+          },
+        },
+      },
+    };
+    const second = {
+      type: 'tool-call' as const,
+      toolCallId: 'ws_b',
+      toolName: 'WebSearch',
+      input: JSON.stringify({ type: 'search', query: 'second' }),
+      providerExecuted: true,
+      providerOptions: {
+        deepseek: {
+          openResponsesExtension: {
+            id: 'openai.web_search',
+            item: {
+              id: 'ws_b',
+              type: 'openai:web_search_call',
+              status: 'completed',
+              action: { type: 'search', query: 'second' },
+            },
+          },
+        },
+      },
+    };
+    await model.doGenerate({
+      prompt: [
+        { role: 'user', content: [{ type: 'text', text: 'search twice' }] },
+        { role: 'assistant', content: [first, second] as never },
+        { role: 'user', content: [{ type: 'text', text: 'continue' }] },
+      ],
+      tools: [webSearchTool()],
+    });
+    const replayed = (bodies[0]?.input as Array<Record<string, unknown>> | undefined)?.filter(
+      (item) => item.type === 'web_search_call',
+    );
+    assert.deepEqual(
+      replayed?.map((item) => item.id),
+      ['ws_a', 'ws_b'],
+      JSON.stringify(bodies[0]?.input),
+    );
+  });
+
   test('merges the opaque replay item onto tool-call provider options', () => {
     const item = {
       id: 'ws_merge',
@@ -493,6 +561,10 @@ describe('DeepSeek Open Responses extension codecs', () => {
     assert.deepEqual(openResponsesExtensionReplayReferenceOptions(merged), {
       deepseek: { openResponsesExtension: { id: 'openai.web_search', itemId: 'ws_merge' } },
     });
+    assert.equal(
+      openResponsesExtensionReplayReferenceOptions({ anthropic: { type: 'server_tool_use' } }),
+      undefined,
+    );
   });
 
   test('replays the hosted search item through the durable RuntimeEvent boundary', async () => {
