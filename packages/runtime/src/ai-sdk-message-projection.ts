@@ -194,7 +194,7 @@ export class AiSdkMessageProjection {
       if (item.kind === 'tool_result' && !support.toolResults) return false;
       if (
         (item.kind === 'tool_call' || item.kind === 'tool_result') &&
-        !this.canReplayProviderExecutedItem(item)
+        !this.canReplayProviderExecutedItem(item, plan.items)
       ) {
         return false;
       }
@@ -217,21 +217,34 @@ export class AiSdkMessageProjection {
       items: plan.items.filter((item) => {
         if (item.kind === 'tool_call' || item.kind === 'tool_result') {
           if (!support.toolCalls || !support.toolResults) return false;
-          if (!this.canReplayProviderExecutedItem(item)) return false;
+          if (!this.canReplayProviderExecutedItem(item, plan.items)) return false;
         }
         return true;
       }),
     };
   }
 
-  private canReplayProviderExecutedItem(item: RuntimeEventModelReplayItem): boolean {
+  private canReplayProviderExecutedItem(
+    item: RuntimeEventModelReplayItem,
+    items: readonly RuntimeEventModelReplayItem[],
+  ): boolean {
     if (item.kind !== 'tool_call' && item.kind !== 'tool_result') return true;
     if (item.providerExecuted !== true) return true;
+    const call =
+      item.kind === 'tool_call'
+        ? item
+        : items.find((entry) => entry.kind === 'tool_call' && entry.toolCallId === item.toolCallId);
+    const result =
+      item.kind === 'tool_result'
+        ? item
+        : items.find(
+            (entry) => entry.kind === 'tool_result' && entry.toolCallId === item.toolCallId,
+          );
     return this.input.modelAdapter.canReplayProviderExecutedExchange({
       providerExecuted: true,
-      ...(item.kind === 'tool_call' ? { providerOptions: item.providerOptions } : {}),
+      providerOptions: call?.kind === 'tool_call' ? call.providerOptions : undefined,
       toolName: item.toolName,
-      ...(item.kind === 'tool_result' ? { output: item.output } : {}),
+      output: result?.kind === 'tool_result' ? result.output : undefined,
     });
   }
 
