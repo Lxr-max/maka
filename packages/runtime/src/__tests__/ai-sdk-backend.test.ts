@@ -8907,6 +8907,112 @@ describe('AiSdkBackend usage telemetry', () => {
     );
   });
 
+  test('records a hosted-search answer as end_turn when the provider finish reason is tool-calls', async () => {
+    // Open Responses reports `tool-calls` for a provider-executed search that
+    // already includes the final answer. With maxSteps set, that must stay a
+    // successful end_turn rather than step_limit / failed.
+    const appended: StoredMessage[] = [];
+    let streamCalls = 0;
+    const model = new MockLanguageModelV4({
+      doStream: async () => {
+        streamCalls += 1;
+        const chunks: LanguageModelV4StreamPart[] =
+          streamCalls === 1
+            ? [
+                { type: 'stream-start', warnings: [] },
+                {
+                  type: 'tool-call',
+                  toolCallId: 'search-1',
+                  toolName: 'WebSearch',
+                  input: '{}',
+                  providerExecuted: true,
+                },
+                {
+                  type: 'tool-result',
+                  toolCallId: 'search-1',
+                  toolName: 'WebSearch',
+                  result: {
+                    action: { type: 'search', queries: ['latest Maka'] },
+                    sources: [{ type: 'url', url: 'https://maka.example/' }],
+                  },
+                  providerExecuted: true,
+                },
+                { type: 'text-start', id: 'text-1' },
+                { type: 'text-delta', id: 'text-1', delta: 'Maka shipped the feature.' },
+                { type: 'text-end', id: 'text-1' },
+                {
+                  type: 'finish',
+                  finishReason: { unified: 'tool-calls', raw: 'tool_calls' },
+                  usage: {
+                    inputTokens: { total: 1, noCache: 1, cacheRead: 0, cacheWrite: 0 },
+                    outputTokens: { total: 1, text: 1, reasoning: 0 },
+                  },
+                },
+              ]
+            : [
+                { type: 'stream-start', warnings: [] },
+                { type: 'text-start', id: 'text-extra' },
+                { type: 'text-delta', id: 'text-extra', delta: 'unexpected continuation' },
+                { type: 'text-end', id: 'text-extra' },
+                {
+                  type: 'finish',
+                  finishReason: { unified: 'stop', raw: 'stop' },
+                  usage: {
+                    inputTokens: { total: 1, noCache: 1, cacheRead: 0, cacheWrite: 0 },
+                    outputTokens: { total: 1, text: 1, reasoning: 0 },
+                  },
+                },
+              ];
+        return {
+          stream: simulateReadableStream({
+            chunks,
+            initialDelayInMs: null,
+            chunkDelayInMs: null,
+          }),
+        };
+      },
+    });
+    const backend = createBackend({
+      appendMessage: async (message) => {
+        appended.push(message);
+      },
+      connection: {
+        slug: 'deepseek',
+        providerType: 'deepseek',
+        defaultModel: 'deepseek-v4-flash',
+      },
+      modelId: 'deepseek-v4-flash',
+      modelFactory: () => model,
+      tools: [buildNativeWebSearchTool({ adapter: 'openai-responses' })],
+      maxSteps: 4,
+    });
+
+    const events: SessionEvent[] = [];
+    await collectEvents(
+      backend.send({ turnId: 'turn-hosted-search-answer', text: 'search', context: [] }),
+      events,
+    );
+
+    assert.equal(streamCalls, 1);
+    assert.equal(
+      events.some((event) => event.type === 'error'),
+      false,
+    );
+    const start = events.find((event) => event.type === 'tool_start');
+    assert.equal(start?.type === 'tool_start' ? start.providerExecuted : undefined, true);
+    const result = events.find((event) => event.type === 'tool_result');
+    assert.equal(result?.type === 'tool_result' ? result.providerExecuted : undefined, true);
+    assert.equal(
+      appended.find((message): message is AssistantMessage => message.type === 'assistant')?.text,
+      'Maka shipped the feature.',
+    );
+    assert.equal(events.at(-1)?.type, 'complete');
+    assert.equal(
+      (events.at(-1) as Extract<SessionEvent, { type: 'complete' }>).stopReason,
+      'end_turn',
+    );
+  });
+
   test('records cumulative usage checkpoints across tool-loop steps and turns', async () => {
     const messages: unknown[] = [];
     const events: SessionEvent[] = [];
