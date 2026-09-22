@@ -2405,9 +2405,7 @@ export class AiSdkTurn {
         // no client call, so they complete as `end_turn`.
         const stopReason =
           this.loopStopReason ??
-          (maxSteps !== undefined &&
-          finishReason === 'tool-calls' &&
-          lastCompletedStepHadToolResult
+          (maxSteps !== undefined && finishReason === 'tool-calls' && lastCompletedStepHadToolResult
             ? 'step_limit'
             : this.mapFinishReason(finishReason));
         trace.modelStreamCompleted(stopReason);

@@ -218,7 +218,9 @@ export class ModelAdapter {
     if (item.providerExecuted !== true) return true;
     if (!this.runtimeEventReplaySupport().providerExecutedTools) return false;
     const { wire, reasoningReplay } = this.runtime;
-    if (wire === 'openai-chat' || reasoningReplay.kind === 'openai-chat-plaintext') {
+    // Chat wires always pair with `none` or `openai-chat-plaintext` replay.
+    // Those converters emit provider-executed calls as client `tool_calls`.
+    if (wire === 'openai-chat') {
       return false;
     }
     if (isOpenResponsesHostedSearchReplay(item)) {

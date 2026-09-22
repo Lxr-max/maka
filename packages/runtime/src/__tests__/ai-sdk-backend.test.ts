@@ -8916,7 +8916,7 @@ describe('AiSdkBackend usage telemetry', () => {
     const model = new MockLanguageModelV4({
       doStream: async () => {
         streamCalls += 1;
-        const chunks: LanguageModelV4StreamPart[] =
+        const chunks = (
           streamCalls === 1
             ? [
                 { type: 'stream-start', warnings: [] },
@@ -8962,7 +8962,8 @@ describe('AiSdkBackend usage telemetry', () => {
                     outputTokens: { total: 1, text: 1, reasoning: 0 },
                   },
                 },
-              ];
+              ]
+        ) as LanguageModelV4StreamPart[];
         return {
           stream: simulateReadableStream({
             chunks,
