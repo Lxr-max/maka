@@ -39,6 +39,7 @@ import type {
   ModelFailureKind,
   ModelToolSet,
   ToolCallPart,
+  UserContent,
 } from './model-protocol.js';
 export type {
   NormalizedUsage,
@@ -80,7 +81,7 @@ import {
   OPENAI_RESPONSES_LANE_HEADER,
   type OpenAiResponsesTransportState,
 } from './openai-responses-websocket.js';
-import { openAiApplyPatchProviderTool } from './openai-apply-patch.js';
+import { openAiApplyPatchProviderTool, codexApplyPatchProviderTool } from './openai-apply-patch.js';
 import { TOOL_SEARCH_NAME, TOOL_SEARCH_PROVIDER_NAME } from './tool-availability.js';
 
 /**
@@ -265,7 +266,8 @@ export class ModelAdapter {
       sdkTools[TOOL_SEARCH_PROVIDER_NAME] = sdkTools[TOOL_SEARCH_NAME];
       delete sdkTools[TOOL_SEARCH_NAME];
     }
-    const fullMessages = input.messages;
+    const fullMessages =
+      this.runtime.wire === 'openai-chat' ? lowerChatToolImages(input.messages) : input.messages;
     const responsesLane =
       input.continuationKey && usesNativeOpenAiResponses(this.input.connection, this.runtime)
         ? input.continuationKey
@@ -1173,6 +1175,48 @@ function translateChunk(
   }
 }
 
+function lowerChatToolImages(messages: readonly ModelMessage[]): ModelMessage[] {
+  const result: ModelMessage[] = [];
+  let images: Exclude<UserContent, string> = [];
+  const flush = () => {
+    if (images.length === 0) return;
+    result.push({ role: 'user', content: images });
+    images = [];
+  };
+  for (const message of messages) {
+    if (message.role !== 'tool') {
+      flush();
+      result.push(message);
+      continue;
+    }
+    result.push({
+      ...message,
+      content: message.content.map((part) => {
+        if (part.type !== 'tool-result' || part.output.type !== 'content') return part;
+        return {
+          ...part,
+          output: {
+            ...part.output,
+            value: part.output.value.map((content) => {
+              if (content.type !== 'file' || !content.mediaType.startsWith('image/'))
+                return content;
+              images.push(
+                { type: 'text', text: `Image from tool ${part.toolName} (${part.toolCallId}):` },
+                content,
+              );
+              return { type: 'text', text: 'Image supplied below.' };
+            }),
+          },
+        };
+      }),
+    });
+  }
+  // Chat tool messages are text-only; attach images after the whole result group
+  // so an assistant's parallel tool calls stay paired before the next user message.
+  flush();
+  return result;
+}
+
 /**
  * OpenAI Responses reserves the provider name `tool_search`. Keep Maka's
  * persisted/history name intact and translate only the provider-bound copy.
@@ -1256,6 +1300,8 @@ function compileProviderTool(
   switch (tool.kind) {
     case 'openai-apply-patch':
       return openAiApplyPatchProviderTool;
+    case 'codex-apply-patch':
+      return codexApplyPatchProviderTool;
     case 'openai-web-search':
       return openai.tools.webSearch({
         ...(tool.searchContextSize ? { searchContextSize: tool.searchContextSize } : {}),
