@@ -25,6 +25,7 @@ import type {
   Experimental_OpenResponsesExtensionStreamPart,
 } from '@ai-sdk/open-responses';
 import type { JSONObject, JSONValue, LanguageModelV4ProviderTool } from '@ai-sdk/provider';
+import type { ProviderType } from '@maka/core/llm-connections';
 import type { CustomPart, ProviderOptions } from './model-protocol.js';
 import { NATIVE_WEB_SEARCH_TOOL_NAME } from './native-web-search-tool.js';
 
@@ -85,7 +86,7 @@ const INCOMING_EVENT_TYPES = new Map<string, string>([
   [WEB_SEARCH_EVENTS.completed, NAMESPACED_WEB_SEARCH_EVENTS.completed],
 ]);
 
-export function usesDeepSeekOpenResponsesExtensions(providerType: string): boolean {
+export function usesDeepSeekOpenResponsesExtensions(providerType: ProviderType): boolean {
   return providerType === 'deepseek';
 }
 
@@ -324,6 +325,10 @@ function decodeDeepSeekWebSearchItem(options: {
       toolCallId,
       toolName: NATIVE_WEB_SEARCH_TOOL_NAME,
       result,
+      // LanguageModelV4ToolResult carries providerExecuted; the extension
+      // content-part union omits it on tool-results, so the codec type
+      // needs this assertion. Maka drops provider-executed results unless
+      // the flag is present (model-adapter translateChunk).
       providerExecuted: true,
       ...(item.status === 'failed' ? { isError: true } : {}),
     } as Experimental_OpenResponsesExtensionContentPart);
