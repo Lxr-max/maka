@@ -26,7 +26,10 @@ import type { LanguageModelV4ProviderTool, LanguageModelV4StreamPart } from '@ai
 import { AiSdkMessageProjection } from '../ai-sdk-message-projection.js';
 import { getAIModel } from '../model-factory.js';
 import { ModelAdapter, lowerModelTools } from '../model-adapter.js';
-import { buildRuntimeEventModelReplayPlan } from '../model-history.js';
+import {
+  buildRuntimeEventModelReplayPlan,
+  type RuntimeEventModelReplayPlan,
+} from '../model-history.js';
 import {
   attachOpenResponsesExtensionReplayItem,
   createDeepSeekOpenResponsesExtensions,
@@ -67,6 +70,104 @@ function deepSeekAdapter(): ModelAdapter {
     newId: () => 'id-1',
     now: () => 1,
   });
+}
+
+function anthropicReplayAdapter(): ModelAdapter {
+  return new ModelAdapter({
+    connection: {
+      slug: 'anthropic-main',
+      providerType: 'anthropic',
+      defaultModel: 'claude-sonnet-4-5-20250929',
+    },
+    apiKey: 'test-key',
+    modelId: 'claude-sonnet-4-5-20250929',
+    modelFactory: () => ({}),
+    newId: () => 'id-1',
+    now: () => 1,
+  });
+}
+
+function hostedReplayIdentity(plan: RuntimeEventModelReplayPlan): string[] {
+  return plan.items.flatMap((item) =>
+    item.kind === 'tool_call' || item.kind === 'tool_result'
+      ? [`${item.invocationId}:${item.kind}:${item.toolCallId}`]
+      : [],
+  );
+}
+
+function crossInvocationHostedSearchHistory(ids: {
+  deepSeek: string;
+  anthropic: string;
+}): RuntimeEvent[] {
+  const exchange = (
+    invocationId: string,
+    toolCallId: string,
+    providerOptions: Record<string, unknown>,
+    providerOutput: unknown,
+  ): RuntimeEvent[] => [
+    {
+      id: `${invocationId}-call`,
+      invocationId,
+      runId: invocationId,
+      sessionId: 'session-replay',
+      turnId: invocationId,
+      ts: 1,
+      partial: false,
+      role: 'model',
+      author: 'agent',
+      refs: { stepId: `${invocationId}-step` },
+      content: {
+        kind: 'function_call',
+        id: toolCallId,
+        name: 'WebSearch',
+        args: { query: 'latest Maka' },
+        providerExecuted: true,
+        providerOptions,
+      },
+    },
+    {
+      id: `${invocationId}-result`,
+      invocationId,
+      runId: invocationId,
+      sessionId: 'session-replay',
+      turnId: invocationId,
+      ts: 2,
+      partial: false,
+      role: 'tool',
+      author: 'tool',
+      content: {
+        kind: 'function_response',
+        id: toolCallId,
+        name: 'WebSearch',
+        result: providerOutput,
+        providerExecuted: true,
+        providerOutput,
+        isError: false,
+      },
+    },
+  ];
+  return [
+    ...exchange(
+      'invocation-deepseek',
+      ids.deepSeek,
+      {
+        deepseek: {
+          openResponsesExtension: {
+            id: 'openai.web_search',
+            item: { id: ids.deepSeek, type: 'web_search_call', status: 'completed' },
+          },
+        },
+      },
+      { type: 'web_search_call', status: 'completed' },
+    ),
+    ...exchange('invocation-anthropic', ids.anthropic, { anthropic: { type: 'server_tool_use' } }, [
+      {
+        type: 'web_search_result',
+        url: 'https://maka.example/',
+        encryptedContent: 'encrypted-result',
+      },
+    ]),
+  ];
 }
 
 function runtimeEvent(input: {
@@ -726,6 +827,35 @@ describe('DeepSeek Open Responses extension codecs', () => {
       false,
       JSON.stringify(result.warnings),
     );
+  });
+
+  test('keeps a later Anthropic hosted search when an older DeepSeek exchange reused its id', () => {
+    const projection = new AiSdkMessageProjection({
+      modelAdapter: anthropicReplayAdapter(),
+      applyPatchProfile: null,
+    });
+    const replayToolIds = (toolCallId: { deepSeek: string; anthropic: string }) => {
+      const plan = buildRuntimeEventModelReplayPlan(crossInvocationHostedSearchHistory(toolCallId));
+      assert.deepEqual(hostedReplayIdentity(plan), [
+        `invocation-deepseek:tool_call:${toolCallId.deepSeek}`,
+        `invocation-deepseek:tool_result:${toolCallId.deepSeek}`,
+        `invocation-anthropic:tool_call:${toolCallId.anthropic}`,
+        `invocation-anthropic:tool_result:${toolCallId.anthropic}`,
+      ]);
+      return hostedReplayIdentity(projection.dropUnsupportedReplayItems(plan));
+    };
+
+    assert.deepEqual(
+      replayToolIds({ deepSeek: 'search-deepseek', anthropic: 'search-anthropic' }),
+      [
+        'invocation-anthropic:tool_call:search-anthropic',
+        'invocation-anthropic:tool_result:search-anthropic',
+      ],
+    );
+    assert.deepEqual(replayToolIds({ deepSeek: 'search-reused', anthropic: 'search-reused' }), [
+      'invocation-anthropic:tool_call:search-reused',
+      'invocation-anthropic:tool_result:search-reused',
+    ]);
   });
 
   test('marks a failed hosted search item as an error result', async () => {
